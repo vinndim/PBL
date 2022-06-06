@@ -1,3 +1,4 @@
+"""QT5 application for recognizing text from an image using tesseract"""
 import os
 import sys
 import uuid
@@ -9,16 +10,14 @@ import sqlite3
 
 from PyQt5 import QtGui
 from PyQt5 import uic
-from querys import MAKE_DB, LOAD_SAVES, DB_NAME, DELETE_IM
+from querys import MAKE_DB, LOAD_SAVES, DB_NAME, DELETE_IM, GET_IMAGE, GET_NOTE, GET_SAVES
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QPixmap, QTransform
 from PyQt5.QtWidgets import QApplication, QMainWindow, QFileDialog, QAbstractItemView, QMenu, QAction
 from qt_material import apply_stylesheet
+from translater import translate
 
-from textblob import TextBlob
-from textblob.exceptions import NotTranslated
-
-from Viewer import Viewer
+from viewer import Viewer
 
 
 class TextScan(QMainWindow):
@@ -27,7 +26,7 @@ class TextScan(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        uic.loadUi('pixels_begin_letters.ui', self)
+        uic.loadUi('resources/pixels_begin_letters.ui', self)
 
         # работа с listWidget
         self.listWidget.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -48,8 +47,8 @@ class TextScan(QMainWindow):
 
         # работа с изображением
         self.load.triggered.connect(self.load_image)
-        self.right_90.triggered.connect(self.rotate_right)  # поворот изображения на право
-        self.left_90.triggered.connect(self.rotate_left)  # поворот изображения на лево
+        self.right_90.triggered.connect(self.rotate_right)  # поворот изображения направо
+        self.left_90.triggered.connect(self.rotate_left)  # поворот изображения налево
 
         # окно обрезания картинки
         self.act_resize.triggered.connect(self.show_dialog)
@@ -67,8 +66,11 @@ class TextScan(QMainWindow):
         self.lineEdit.textChanged.connect(self.ch_save_btn)
         self.copy_text_btn.clicked.connect(self.copy_text_func)
         self.save_btn.clicked.connect(self.save_data)
-
+        # получение директории программы
+        self.dir = os.getcwd()
         # работа с базой данных
+        if not os.path.isdir(os.path.join(self.dir, 'db')):
+            os.mkdir(os.path.join(self.dir, 'db'))
         self.con = sqlite3.connect(DB_NAME)
         self.cur = self.con.cursor()
         self.cur.execute(MAKE_DB)
@@ -86,7 +88,6 @@ class TextScan(QMainWindow):
         self.filename = None
         self.text = None
         self.loaded_image = None
-        self.dir = os.getcwd()
         self.pr_sc = None
         self.click_flag = None
         self.label_have_im = False
@@ -113,7 +114,7 @@ class TextScan(QMainWindow):
         hash_im = self.hash_im[self.listWidget.currentRow()]
         self.cur.execute(DELETE_IM, {"hashIm": hash_im})
         self.listWidget.takeItem(self.listWidget.currentRow())
-        path = os.path.join(self.dir, 'Saves', str(hash_im) + '.png')
+        path = os.path.join(self.dir, '../saves', str(hash_im) + '.png')
         os.remove(path)
         self.saves = [save[0] for save in
                       self.cur.execute('''SELECT note FROM preservation''').fetchall()]
@@ -130,13 +131,12 @@ class TextScan(QMainWindow):
             self.clear_tab()
             self.show_image(QPixmap(self.loaded_image))
             self.filename = path
-            print(path)
         except IndexError:
-            if not os.path.isdir("prt_sc"):
-                os.mkdir("prt_sc")
+            if not os.path.isdir("cashe"):
+                os.mkdir("cashe")
             # изображение скопированно созданием screenshot
             self.loaded_image = self.clipboard.image()
-            self.pr_sc = os.path.join(self.dir, 'prt_sc', 'im.png')
+            self.pr_sc = os.path.join(self.dir, 'cashe', 'pr_sc.png')
             self.filename = self.pr_sc
             self.clear_tab()
             self.loaded_image.save(self.filename)
@@ -190,12 +190,9 @@ class TextScan(QMainWindow):
                 hash_im = self.hash_im[i]
                 print(hash_im)
                 break
-        image = self.cur.execute('''SELECT path FROM preservation 
-                                    WHERE hashIm = :hashIm''',
+        image = self.cur.execute(GET_IMAGE,
                                  {"hashIm": hash_im}).fetchall()[0][0]
-        text = self.cur.execute('''SELECT text FROM preservation 
-                    WHERE id = (SELECT id FROM preservation 
-                    WHERE note = :note)''', {"note": note}).fetchall()[0][0]
+        text = self.cur.execute(GET_NOTE, {"note": note}).fetchall()[0][0]
         self.label_have_im = True
         self.lineEdit.setText(note)
         self.loaded_image = QPixmap(image)
@@ -205,27 +202,10 @@ class TextScan(QMainWindow):
 
     # функция перевода текста
     def tr_text(self, lang):
-        rem_n = self.plainTextEdit.toPlainText().split('\n')
-        result = []
-        answer = ''
-        for string in rem_n:
-            blob = TextBlob(string)
-            if len(string) >= 3:
-                try:
-                    if blob.detect_language() != lang:
-                        result.append(str(blob.translate(to=lang)) + '\n')
-                except HTTPError:
-                    result.append('<не переводится>')
-                except NotTranslated:
-                    result.append('<не переводится>')
-                    print(NotTranslated)
-            elif string == '':
-                result.append('\n')
-            else:
-                result.append(string)
-        for line in result:
-            answer += line
-        self.plainTextEdit.setPlainText(str(answer))
+        print(lang)
+        rem_n = self.plainTextEdit.toPlainText()
+        self.plainTextEdit.setPlainText(translate(rem_n,
+                                                  f"{'ru' if lang == 'en' else 'en'}|{lang}"))
 
     # возвращение кнопки в исходный вид при изменении lineEdit
     def ch_save_btn(self):
@@ -242,8 +222,8 @@ class TextScan(QMainWindow):
     # Функция сохранения текста, пути и записок в базу данных
     def save_data(self):
         if self.label_have_im and self.lineEdit.text() and self.plainTextEdit.toPlainText():
-            if not os.path.isdir("Saves"):
-                os.mkdir("Saves")
+            if not os.path.isdir("../saves"):
+                os.mkdir("../saves")
             self.save_btn.setEnabled(False)
             self.save_btn.setText("Сохранено")
             self.save_btn.setStyleSheet("color: #00FF7F;")
@@ -252,10 +232,9 @@ class TextScan(QMainWindow):
             self.listWidget.addItem(note)
             hash_im = str(uuid.uuid4())
             text = self.plainTextEdit.toPlainText()
-            path = os.path.join(self.dir, 'Saves', str(hash_im) + '.png')  # путь к изображению
+            path = os.path.join(self.dir, '../saves', str(hash_im) + '.png')  # путь к изображению
             self.label.pixmap().save(path)  # сохранение изображения в папку Saves
-            self.cur.execute('''INSERT INTO preservation (path, text, note, hashIm)
-                                            VALUES (?, ?, ?, ?)''',
+            self.cur.execute(GET_SAVES,
                              [path, text, note, hash_im])  # передача пути изображения
             self.saves.append(note)
             self.hash_im.append(hash_im)
@@ -272,17 +251,19 @@ class TextScan(QMainWindow):
     # Функция "сканирования" изображения и вывода текста с изображения
     def show_text(self):
         # относителный путь до tesseract.exe
-        print(os.path.join(self.dir, 'tesseract', 'tesseract.exe'))
-        pytesseract.pytesseract.tesseract_cmd = os.path.join(self.dir, 'tesseract', 'tesseract.exe')
+        print(os.path.join(self.dir, 'resources', 'tesseract5.1', 'tesseract.exe'))
+        pytesseract.pytesseract.tesseract_cmd = os.path.join(self.dir, 'resources', 'tesseract5.1', 'tesseract.exe')
         try:
-            self.loaded_image.save('im_with_text.png')
-            img = cv2.imread('im_with_text.png')
+            self.loaded_image.save(os.path.join(self.dir, 'cashe', 'im_with_text.png'))
+            img = cv2.imread(os.path.join(self.dir, 'cashe', 'im_with_text.png'))
             self.text = pytesseract.image_to_string(img, lang=self.language)
             self.plainTextEdit.setStyleSheet('')
             self.plainTextEdit.setPlainText(self.text)
         except TypeError:
+            print("TypeError")
             self.plainTextEdit.setStyleSheet('border: 2px solid #DC143C')
         except AttributeError:
+            print("AttributeError")
             self.plainTextEdit.setStyleSheet('border: 2px solid #DC143C')
 
     # изменение угла на +90 градусов
@@ -373,7 +354,7 @@ def except_hook(cls, exception, traceback):
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    app.setWindowIcon(QtGui.QIcon('icon.ico'))
+    app.setWindowIcon(QtGui.QIcon('resources/icon.ico'))
     demo = TextScan()
     apply_stylesheet(app, theme='dark_blue.xml')
     demo.show()
